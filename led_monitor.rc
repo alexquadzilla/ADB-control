@@ -1,0 +1,9 @@
+service led_monitor /system/bin/sh /vendor/etc/init/led_startup.sh
+    class main
+    user root
+    group root system
+    seclabel u:r:su:s0
+    disabled
+
+on property:sys.boot_completed=1
+    start led_monitor
