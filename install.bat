@@ -26,7 +26,7 @@ if "%LOCAL_FAIL%"=="1" goto :fail
 echo Используем adb: %ADB_EXE%
 echo.
 echo ========================================
-echo  Установка скриптов на LED-экран (v2)
+echo  Установка скриптов на LED-экран (v2.1)
 echo ========================================
 echo  Устройство: %DEV%
 echo  Режим: %MODE%
@@ -90,8 +90,9 @@ echo Сейчас устройство перезагрузится.
 echo.
 
 if "%MODE%"=="wifi" (
-    echo ПОСЛЕ перезагрузки IP-адрес может измениться!
-    echo Вам нужно будет узнать новый IP.
+    echo ПОСЛЕ перезагрузки IP-адрес может измениться —
+    echo скрипт попробует найти устройство сам: прежний IP,
+    echo затем поиск по MAC в подсети, и только потом спросит вас.
 ) else (
     echo После перезагрузки USB-устройство определится автоматически.
 )
@@ -100,69 +101,45 @@ echo.
 echo Нажмите любую клавишу для перезагрузки...
 pause >nul
 
+call :save_reconnect_info
+set "FIND_NEXT=reconnect_after_reboot"
 %ADB% reboot
 echo.
 echo Ожидание перезагрузки устройства...
-REM v2: wait_boot возвращает 2, если устройство не ответило за таймаут —
-REM в wifi-режиме это штатный случай "IP сменился после ребута",
-REM уводим в запрос нового IP вместо ложного "установка не удалась"
+REM v2.1: даём устройству реально уйти в ребут, иначе wait_boot может
+REM ответить "успех" по ещё живому соединению до фактического ребута
+timeout /t 8 /nobreak >nul
 call :wait_boot 180
-if errorlevel 1 (
-    if "%MODE%"=="wifi" goto :ask_new_ip
-    echo ОШИБКА: устройство не загрузилось за 180 секунд
-    goto :fail
-)
-
-if "%MODE%"=="wifi" goto :ask_new_ip
-goto :wait_usb
-
-:ask_new_ip
-echo.
-echo ========================================
-echo  Введите НОВЫЙ IP-адрес устройства
-echo ========================================
-echo.
-echo Узнайте новый IP:
-echo   - На экране: Настройки - О планшете - Статус - IP-адрес
-echo   - Или посмотрите в списке клиентов вашего роутера
-echo.
-set /p NEW_IP=Новый IP-адрес: 
-if "!NEW_IP!"=="" (
-    echo ОШИБКА: IP не указан
-    pause
-    exit /b 1
-)
-echo !NEW_IP!|findstr /C:":" >nul
-if errorlevel 1 set "NEW_IP=!NEW_IP!:5555"
-set "DEV=!NEW_IP!"
-set "ADB=%ADB_EXE% -s !DEV!"
-
-echo Подключаемся к новому адресу !DEV!...
-call :connect_retry "!DEV!" 3
-if errorlevel 1 goto :fail
-goto :reconnect_after_reboot
+if not errorlevel 1 goto :reconnect_after_reboot
+REM таймаут: в wifi это штатный случай "IP сменился" — ищем устройство сами
+if "%MODE%"=="wifi" goto :find_new_ip
+echo ОШИБКА: устройство не загрузилось за 180 секунд
+goto :fail
 
 :wait_usb
 echo.
 echo Ожидание подключения USB-устройства...
-REM v2: без wait-for-device — он висит вечно, если устройство не вернётся;
-REM опрашиваем тем же wait_boot (adb shell по отсутствующему серийнику
-REM завершается мгновенно, таймаут реально достижим)
+REM v2: без wait-for-device — он висит вечно, если устройство не вернётся
+REM (или флапает FUNCTIONFS_BIND); опрашиваем тем же wait_boot
 call :wait_boot 180
 if errorlevel 1 (
     echo ОШИБКА: USB-устройство не вернулось после перезагрузки
+    echo Если USB-adbd не поднимается, используйте Wi-Fi: install.bat IP:5555
     goto :fail
 )
 
 :reconnect_after_reboot
-%ADB% root
+%ADB% root >nul 2>&1
 timeout /t 3 /nobreak >nul
 
 if "%MODE%"=="wifi" (
     call :connect_retry "!DEV!" 3
     if errorlevel 1 goto :fail
 ) else (
-    %ADB% wait-for-device
+    REM v2.1: wait-for-device висит вечно при флапающем USB-транспорте
+    REM (FUNCTIONFS_BIND) — ждём через wait_boot с таймаутом
+    call :wait_boot 60
+    if errorlevel 1 goto :fail
 )
 
 echo.
@@ -226,6 +203,8 @@ if errorlevel 1 goto :fail
 
 echo.
 echo [6/6] Перезагрузка для регистрации сервиса...
+call :save_reconnect_info
+set "FIND_NEXT=final_check"
 %ADB% reboot
 echo   OK: устройство перезагружается
 echo.
@@ -233,45 +212,12 @@ echo ========================================
 echo  Ожидание загрузки устройства
 echo ========================================
 echo.
-
+timeout /t 8 /nobreak >nul
 call :wait_boot 180
-if errorlevel 1 (
-    if "%MODE%"=="wifi" goto :ask_ip_after_final_reboot
-    echo ОШИБКА: устройство не загрузилось за 180 секунд
-    goto :fail
-)
-echo.
-echo Загрузка завершена! Подключаемся...
-echo.
-
-if "%MODE%"=="wifi" (
-    call :connect_retry "!DEV!" 3
-    if errorlevel 1 goto :ask_ip_after_final_reboot
-    goto :final_check
-)
-
-"%ADB_EXE%" wait-for-device
-echo   OK: устройство подключено
-goto :final_check
-
-:ask_ip_after_final_reboot
-echo.
-echo ========================================
-echo  Введите НОВЫЙ IP-адрес устройства
-echo ========================================
-echo.
-set /p NEW_IP=Новый IP-адрес: 
-if "!NEW_IP!"=="" (
-    echo ОШИБКА: IP не указан
-    pause
-    exit /b 1
-)
-echo !NEW_IP!|findstr /C:":" >nul
-if errorlevel 1 set "NEW_IP=!NEW_IP!:5555"
-set "DEV=!NEW_IP!"
-set "ADB=%ADB_EXE% -s !DEV!"
-call :connect_retry "!DEV!" 3
-if errorlevel 1 goto :fail
+if not errorlevel 1 goto :final_check
+if "%MODE%"=="wifi" goto :find_new_ip
+echo ОШИБКА: устройство не загрузилось за 180 секунд
+goto :fail
 
 :final_check
 echo.
@@ -367,6 +313,75 @@ echo Финальная проверка PID-файлов:
 
 goto :end
 
+REM === v2.1: запоминаем адрес/подсеть/MAC и делаем порт adbd постоянным ===
+REM Нужно, чтобы после ребута найти устройство, если DHCP сменил IP.
+REM adb tcpip-порт слетает после ребута без persist (требует root; у нас он
+REM уже получен). led_startup.sh на следующих загрузках снова отключит ADB,
+REM так что безопасности это не ломает.
+:save_reconnect_info
+if /i "%MODE%"=="wifi" (
+    for /f "tokens=1 delims=:" %%a in ("%DEV%") do set "OLD_IP=%%a"
+    for /f "tokens=1-3 delims=." %%a in ("!OLD_IP!") do set "SUBNET=%%a.%%b.%%c"
+    set "DEV_MAC="
+    for /f "usebackq delims=" %%a in (`%ADB% shell cat /sys/class/net/wlan0/address`) do set "DEV_MAC=%%a"
+    REM MAC из sysfs: 74:24:ca:41:8e:bd -> формат arp -a (74-24-ca-...):
+    set "DEV_MAC=!DEV_MAC:~0,17!"
+    set "DEV_MAC=!DEV_MAC::=-!"
+    if not "!DEV_MAC:~2,1!"=="-" set "DEV_MAC="
+    %ADB% shell setprop persist.adb.tcp.port 5555 >nul 2>&1
+)
+exit /b 0
+
+REM === v2.1: автоопределение адреса после ребута ===
+REM Порядок: прежний IP (DHCP чаще выдаёт тот же) -> поиск в подсети /24
+REM по MAC (ping-sweep + arp -a) -> ручной ввод.
+REM FIND_NEXT задаёт, куда идти после успешного подключения:
+REM reconnect_after_reboot (после первого ребута) или final_check (после финального).
+:find_new_ip
+echo.
+echo Пробуем прежний адрес !OLD_IP!:5555 ...
+call :connect_retry "!OLD_IP!:5555" 1
+if not errorlevel 1 (
+    set "DEV=!OLD_IP!:5555"
+    set "ADB=%ADB_EXE% -s !DEV!"
+    goto :%FIND_NEXT%
+)
+if not defined DEV_MAC goto :ask_new_ip
+if not defined SUBNET  goto :ask_new_ip
+echo Поиск в сети !SUBNET!.0/24 по MAC !DEV_MAC! (займёт ~3 сек) ...
+set "FOUND_IP="
+for /f "usebackq delims=" %%a in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$s='!SUBNET!'; $m='!DEV_MAC!'; $t=@(); 1..254 | ForEach-Object { $t += (New-Object System.Net.NetworkInformation.Ping).SendPingAsync($s+'.'+$_,500) }; [System.Threading.Tasks.Task]::WaitAll($t); Start-Sleep -Milliseconds 400; (arp -a) -match $m | ForEach-Object { $_.Trim().Split(' ')[0] }"`) do set "FOUND_IP=%%a"
+if not defined FOUND_IP goto :ask_new_ip
+echo Устройство найдено: !FOUND_IP!
+set "NEW_IP=!FOUND_IP!"
+goto :apply_new_ip
+
+:ask_new_ip
+echo.
+echo ========================================
+echo  Введите НОВЫЙ IP-адрес устройства
+echo ========================================
+echo Автоопределение не сработало. Узнайте IP:
+echo   - Настройки - О планшете - Статус - IP-адрес
+echo   - Список клиентов вашего роутера
+echo.
+set "NEW_IP="
+set /p NEW_IP=Новый IP-адрес: 
+if "!NEW_IP!"=="" (
+    echo ОШИБКА: IP не указан
+    goto :fail
+)
+
+:apply_new_ip
+echo !NEW_IP!|findstr /C:":" >nul
+if errorlevel 1 set "NEW_IP=!NEW_IP!:5555"
+set "DEV=!NEW_IP!"
+set "ADB=%ADB_EXE% -s !DEV!"
+echo Подключаемся к !DEV! ...
+call :connect_retry "!DEV!" 3
+if errorlevel 1 goto :fail
+goto :%FIND_NEXT%
+
 REM === push с проверкой кода возврата: при ошибке сразу выходим из подпрограммы ===
 :push_one
 "%ADB_EXE%" -s "%DEV%" push %1 "%~2"
@@ -377,11 +392,13 @@ if errorlevel 1 (
 echo   OK: %~nx1 -^> %2
 exit /b 0
 
-REM === v2: Активное ожидание загрузки — опрос sys.boot_completed.
-REM БЕЗ wait-for-device: при недоступном устройстве он блокируется
-REM НАВСЕГДА и таймаут недостижим. adb shell по отсутствующему
-REM серийнику завершается ошибкой мгновенно, поэтому цикл
-REM действительно укладывается в таймаут.
+REM === v2.1: Активное ожидание загрузки — опрос sys.boot_completed.
+REM Сначала дешёвый опрос `adb devices`: он НЕ блокируется даже при
+REM флапающем USB-транспорте (FUNCTIONFS_BIND), в отличие от wait-for-device
+REM и shell-вызовов по недоступному серийнику — оба висят вечно, и таймаут
+REM был бы недостижим. getprop зовём только когда устройство видно
+REM в состоянии device; adb shell по отсутствующему серийнику мгновенно
+REM завершается ошибкой, поэтому цикл укладывается в таймаут.
 REM Возврат: 0 — загрузилась, 2 — нет ответа за таймаут.
 :wait_boot
 set "WB_TIMEOUT=%~1"
@@ -389,8 +406,10 @@ set /a WB_ELAPSED=0
 :wb_loop
 set "BOOT_V="
 if "%MODE%"=="wifi" "%ADB_EXE%" connect "%DEV%" >nul 2>&1
+set "DEV_SEEN="
+for /f "tokens=1,2" %%A in ('"%ADB_EXE%" devices 2^>nul ^| findstr /V /C:"List of"') do if /I "%%A"=="%DEV%" set "DEV_SEEN=%%B"
+if /I "!DEV_SEEN!"=="device" for /f "tokens=1 delims= " %%V in ('%ADB% shell getprop sys.boot_completed 2^>nul') do set "BOOT_V=%%V"
 REM adb shell присылает CRLF — сравниваем первый символ, хвост не важен
-for /f "tokens=1 delims= " %%V in ('%ADB% shell getprop sys.boot_completed 2^>nul') do set "BOOT_V=%%V"
 if "!BOOT_V:~0,1!"=="1" (
     echo   OK: устройство загрузилось ^(!WB_ELAPSED! сек^)
     exit /b 0

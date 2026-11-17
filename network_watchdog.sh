@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # ============================================================
-# network_watchdog.sh v2 — сторож сети для LED-экранов (T982)
+# network_watchdog.sh v2.1 — сторож сети для LED-экранов (T982)
 #
 # Профиль отказа парка (по досье "Проблема Wi-Fi"): гибель драйвера
 # AIC8800 — скан умирает, соединение рвётся, самовосстановления нет,
@@ -58,16 +58,23 @@ REBOOTS=0
 [ -f "$COUNTER_FILE" ] && REBOOTS=$(cat "$COUNTER_FILE")
 [ -z "$REBOOTS" ] && REBOOTS=0
 
-# Шлюз кэшируем в файл: при смерти драйвера маршрут исчезает из
-# таблицы, а адрес из кэша остаётся — и это ровно тот случай,
-# когда ребут оправдан. awk не используем: в toybox его может не быть.
-GW=$(ip route 2>/dev/null | grep '^default' | head -n 1 | cut -d' ' -f3)
+# Автодетект шлюза (v2.1): на Android 11 в main-таблице `ip route` НЕТ
+# маршрута default — netd раскладывает их по per-network таблицам, поэтому
+# единственный надёжный источник — `ip route get`. awk в toybox Android 11
+# нет — парсим grep/cut. Результат кэшируем в gateway.txt: при смерти
+# драйвера маршрут исчезает, а адрес из кэша остаётся — и это ровно тот
+# случай, когда вмешательство оправдано.
+gw_from_route() {
+    ip route get 1.1.1.1 2>/dev/null | grep -o 'via [0-9.]*' | head -n 1 | cut -d' ' -f2
+}
+
+GW=$(gw_from_route)
 if [ -n "$GW" ]; then
     echo "$GW" > "$GW_FILE"
 else
     [ -f "$GW_FILE" ] && GW=$(cat "$GW_FILE")
 fi
-# Аварийный адрес по умолчанию — подсеть точек парка (192.168.100.x)
+# Аварийный адрес до первого успешного автодетекта (подсеть точек парка)
 [ -z "$GW" ] && GW=192.168.100.1
 
 log "START pid=$$ gw=$GW reboots=$REBOOTS"
@@ -78,6 +85,18 @@ wifi_restart() {
     sleep 5
     svc wifi enable 2>/dev/null
     sleep 60
+}
+
+# v2.1: перепроверка шлюза по живому маршруту — на случай, если экран
+# переехали в другую сеть, а кэш указывает на старый шлюз.
+detect_gw() {
+    RT=$(gw_from_route)
+    if [ -n "$RT" ] && [ "$RT" != "$GW" ]; then
+        log "GW изменился: $GW -> $RT (кэш обновлён)"
+        GW="$RT"
+        echo "$GW" > "$GW_FILE"
+    fi
+    [ -n "$RT" ]
 }
 
 # Контроль сканера: обновляем результаты и считаем сети.
@@ -134,6 +153,15 @@ while true; do
     else
         ERRORS=$((ERRORS + 1))
         log "GW FAIL ($GW) errors=$ERRORS/$MAX_ERRORS reboots=$REBOOTS/$MAX_REBOOTS"
+        # v2.1: шлюз мог смениться (экран переехали / роутер заменили).
+        # Пока сетевой стек жив, `ip route get` ответит новым via —
+        # переключаемся и сбрасываем счётчик, чтобы не ребутить
+        # исправное устройство, попавшее в другую сеть.
+        GW_OLD="$GW"
+        detect_gw
+        if [ "$GW" != "$GW_OLD" ]; then
+            ERRORS=0
+        fi
         if [ "$ERRORS" -ge "$MAX_ERRORS" ]; then
             if [ "$WIFIX" -lt "$MAX_WIFIX" ]; then
                 WIFIX=$((WIFIX + 1))
