@@ -3,20 +3,18 @@ DIR=/data/local/tmp/scripts
 PIDFILE="$DIR/cache_cleaner.pid"
 LOG="$DIR/cache_cleaner.log"
 MARKER="$DIR/last_clean_day.txt"
-MAX_LOG_LINES=200
+MAX_LOG_BYTES=256000     # жёсткий предел размера лога: 250 КБ
+TRIM_LOG_BYTES=128000    # при превышении оставляем последние ~125 КБ
 
 mkdir -p "$DIR"
 
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"
-}
-
-rotate_log() {
+    # Ротация по размеру (250 КБ) после каждой записи
     if [ -f "$LOG" ]; then
-        LINES=$(wc -l < "$LOG" 2>/dev/null)
-        if [ "$LINES" -gt "$MAX_LOG_LINES" ] 2>/dev/null; then
-            tail -n 100 "$LOG" > "$LOG.tmp"
-            mv "$LOG.tmp" "$LOG"
+        SIZE=$(wc -c < "$LOG" 2>/dev/null)
+        if [ "$SIZE" -gt "$MAX_LOG_BYTES" ] 2>/dev/null; then
+            tail -c "$TRIM_LOG_BYTES" "$LOG" > "$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
         fi
     fi
 }
@@ -31,7 +29,6 @@ fi
 echo $$ > "$PIDFILE"
 trap "rm -f $PIDFILE" EXIT
 
-rotate_log
 log "START. pid=$$"
 
 while true; do

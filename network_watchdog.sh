@@ -5,21 +5,20 @@ COUNTER_FILE="$DIR/reboot_counter.txt"
 LOG="$DIR/watchdog.log"
 MAX_ERRORS=5
 MAX_REBOOTS=3
-MAX_LOG_LINES=500
+MAX_LOG_BYTES=256000     # жёсткий предел размера лога: 250 КБ
+TRIM_LOG_BYTES=128000    # при превышении оставляем последние ~125 КБ
 ERRORS=0
 
 mkdir -p "$DIR"
 
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"
-}
-
-rotate_log() {
+    # Ротация по размеру (250 КБ) — вызывается после каждой записи,
+    # лог не растёт бесконечно между перезапусками watchdog
     if [ -f "$LOG" ]; then
-        LINES=$(wc -l < "$LOG" 2>/dev/null)
-        if [ "$LINES" -gt "$MAX_LOG_LINES" ] 2>/dev/null; then
-            tail -n 250 "$LOG" > "$LOG.tmp"
-            mv "$LOG.tmp" "$LOG"
+        SIZE=$(wc -c < "$LOG" 2>/dev/null)
+        if [ "$SIZE" -gt "$MAX_LOG_BYTES" ] 2>/dev/null; then
+            tail -c "$TRIM_LOG_BYTES" "$LOG" > "$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
         fi
     fi
 }
@@ -38,7 +37,6 @@ REBOOTS=0
 [ -f "$COUNTER_FILE" ] && REBOOTS=$(cat "$COUNTER_FILE")
 [ -z "$REBOOTS" ] && REBOOTS=0
 
-rotate_log
 log "START. pid=$$ reboots=$REBOOTS"
 
 while true; do

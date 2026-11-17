@@ -8,6 +8,21 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM === Проверка обязательных файлов и формата строк (LF) ===
+REM Конвертация CRLF->LF на устройстве удалена: файлы должны быть в LF изначально,
+REM иначе init не сможет разобрать led_monitor.rc, а shell сломает shebang в .sh
+set "LOCAL_FAIL=0"
+for %%F in (network_watchdog.sh cache_cleaner.sh led_startup.sh led_monitor.rc) do (
+    if not exist "%~dp0%%F" (
+        echo ОШИБКА: отсутствует файл %%F
+        set "LOCAL_FAIL=1"
+    ) else (
+        call :check_lf "%~dp0%%F"
+        if errorlevel 1 set "LOCAL_FAIL=1"
+    )
+)
+if "%LOCAL_FAIL%"=="1" goto :fail
+
 echo Используем adb: %ADB_EXE%
 echo.
 echo ========================================
@@ -38,7 +53,8 @@ if "%MODE%"=="wifi" (
     %ADB% wait-for-device
 )
 
-%ADB% shell id | find "uid=0" >nul
+REM === findstr вместо find: в PATH Windows есть GNU find, который ломает проверку ===
+%ADB% shell id | findstr /C:"uid=0" >nul
 if errorlevel 1 (
     echo ОШИБКА: не удалось получить root
     goto :fail
@@ -47,7 +63,8 @@ echo   OK: uid=0 root
 
 echo [3/6] Монтирование /vendor в режим записи...
 %ADB% shell "mount -o rw,remount /vendor"
-%ADB% shell "mount | grep ' /vendor '" | find "rw" >nul
+REM Проверяем через mountpoint: на AOSP он возвращает 0 только если /vendor в rw
+%ADB% shell "mountpoint -w /vendor" >nul 2>&1
 if errorlevel 1 goto :verity_needed
 
 echo   OK: /vendor доступен для записи
@@ -56,7 +73,8 @@ goto :upload_scripts
 :verity_needed
 echo   ВНИМАНИЕ: /vendor остался в режиме ro
 echo   Пробуем отключить verity...
-"%ADB_EXE%" -s "%DEV%" disable-verity
+%ADB% shell disable-verity
+if errorlevel 1 echo   Предупреждение: disable-verity вернул ошибку, пробуем перезагрузку всё равно
 timeout /t 3 /nobreak >nul
 
 echo.
@@ -80,8 +98,12 @@ pause >nul
 
 %ADB% reboot
 echo.
-echo Ожидание перезагрузки 50 секунд...
-timeout /t 50 /nobreak >nul
+echo Ожидание перезагрузки устройства...
+call :wait_boot 180
+if errorlevel 1 (
+    echo ОШИБКА: устройство не загрузилось за 180 секунд
+    goto :fail
+)
 
 if "%MODE%"=="wifi" goto :ask_new_ip
 goto :wait_usb
@@ -102,7 +124,7 @@ if "!NEW_IP!"=="" (
     pause
     exit /b 1
 )
-echo !NEW_IP!|find ":" >nul
+echo !NEW_IP!|findstr /C:":" >nul
 if errorlevel 1 set "NEW_IP=!NEW_IP!:5555"
 set "DEV=!NEW_IP!"
 set "ADB=%ADB_EXE% -s !DEV!"
@@ -110,10 +132,6 @@ set "ADB=%ADB_EXE% -s !DEV!"
 echo Подключаемся к новому адресу !DEV!...
 call :connect_retry "!DEV!" 3
 if errorlevel 1 goto :fail
-
-echo.
-echo Ожидание полной загрузки adbd (10 сек)...
-timeout /t 10 /nobreak >nul
 goto :reconnect_after_reboot
 
 :wait_usb
@@ -121,9 +139,6 @@ echo.
 echo Ожидание подключения USB-устройства...
 "%ADB_EXE%" wait-for-device
 echo   OK: устройство подключено
-echo.
-echo Ожидание полной загрузки adbd (10 сек)...
-timeout /t 10 /nobreak >nul
 
 :reconnect_after_reboot
 %ADB% root
@@ -139,9 +154,7 @@ if "%MODE%"=="wifi" (
 echo.
 echo Повторное монтирование /vendor...
 %ADB% shell "mount -o rw,remount /vendor"
-timeout /t 2 /nobreak >nul
-
-%ADB% shell "mount | grep ' /vendor '" | find "rw" >nul
+%ADB% shell "mountpoint -w /vendor" >nul 2>&1
 if errorlevel 1 (
     echo ОШИБКА: не удалось смонтировать /vendor в rw
     pause
@@ -154,32 +167,44 @@ echo   OK: /vendor доступен для записи
 echo [4/6] Загрузка скриптов...
 %ADB% shell "mkdir -p /data/local/tmp/scripts"
 
+REM Маркер первого запуска создаём СРАЗУ (до долгого push), чтобы led_startup.sh
+REM не отключил сетевой ADB во время установки. Существующий маркер НЕ удаляем:
+REM это защита от случайного повторного запуска install.bat на боевом устройстве.
 %ADB% shell "touch /data/local/tmp/scripts/.first_run_after_install"
+if errorlevel 1 goto :fail
 
-"%ADB_EXE%" -s "!DEV!" push "%~dp0network_watchdog.sh" /data/local/tmp/scripts/
-"%ADB_EXE%" -s "!DEV!" push "%~dp0cache_cleaner.sh" /data/local/tmp/scripts/
-"%ADB_EXE%" -s "!DEV!" push "%~dp0led_startup.sh" /vendor/etc/init/
-"%ADB_EXE%" -s "!DEV!" push "%~dp0led_monitor.rc" /vendor/etc/init/
+call :push_one "%~dp0network_watchdog.sh" /data/local/tmp/scripts/ || goto :fail
+call :push_one "%~dp0cache_cleaner.sh" /data/local/tmp/scripts/ || goto :fail
+call :push_one "%~dp0led_startup.sh" /vendor/etc/init/ || goto :fail
+call :push_one "%~dp0led_monitor.rc" /vendor/etc/init/ || goto :fail
 
-echo.
-echo   Конвертация CRLF в LF...
-%ADB% shell "sed -i 's/\r$//' /data/local/tmp/scripts/network_watchdog.sh"
-%ADB% shell "sed -i 's/\r$//' /data/local/tmp/scripts/cache_cleaner.sh"
-%ADB% shell "sed -i 's/\r$//' /vendor/etc/init/led_startup.sh"
-%ADB% shell "sed -i 's/\r$//' /vendor/etc/init/led_monitor.rc"
-echo   OK: конвертация завершена
+REM Финальная проверка формата загруженных файлов на устройстве (страховка):
+REM одна команда на все файлы, вывод BAD:<путь> для файлов с символами CR
+REM (шаблон CR собирается printf внутри shell-скрипта, без \r в тексте BAT)
+%ADB% shell "CR=$(printf '\\015'); for f in /data/local/tmp/scripts/network_watchdog.sh /data/local/tmp/scripts/cache_cleaner.sh /vendor/etc/init/led_startup.sh /vendor/etc/init/led_monitor.rc; do grep -q \"$CR\" \"$f\" && echo BAD:$f; done" > "%TEMP%\led_cr_check.txt" 2>nul
+findstr /C:"BAD:" "%TEMP%\led_cr_check.txt" >nul 2>&1
+if not errorlevel 1 (
+    echo ОШИБКА: эти файлы на устройстве содержат символы CR:
+    type "%TEMP%\led_cr_check.txt"
+    del "%TEMP%\led_cr_check.txt" >nul 2>&1
+    goto :fail
+)
+del "%TEMP%\led_cr_check.txt" >nul 2>&1
+echo   OK: формат файлов проверен ^(LF^)
 
 %ADB% shell "chmod 755 /data/local/tmp/scripts/*.sh /vendor/etc/init/led_startup.sh"
+if errorlevel 1 goto :fail
 %ADB% shell "chmod 644 /vendor/etc/init/led_monitor.rc"
+if errorlevel 1 goto :fail
 
 echo [5/6] Проверка файлов...
-%ADB% shell "ls -l /vendor/etc/init/led_monitor.rc"
-%ADB% shell "ls -l /vendor/etc/init/led_startup.sh"
+%ADB% shell "ls -l /vendor/etc/init/led_monitor.rc" || goto :fail
+%ADB% shell "ls -l /vendor/etc/init/led_startup.sh" || goto :fail
+%ADB% shell "ls -l /data/local/tmp/scripts/network_watchdog.sh /data/local/tmp/scripts/cache_cleaner.sh" || goto :fail
 
-echo.
-echo   Проверка формата файлов:
-%ADB% shell "od -c /vendor/etc/init/led_startup.sh | head -1"
-%ADB% shell "od -c /data/local/tmp/scripts/network_watchdog.sh | head -1"
+REM Гарантируем наличие маркера непосредственно перед перезагрузкой
+%ADB% shell "touch /data/local/tmp/scripts/.first_run_after_install"
+if errorlevel 1 goto :fail
 
 echo.
 echo [6/6] Перезагрузка для регистрации сервиса...
@@ -190,9 +215,12 @@ echo ========================================
 echo  Ожидание загрузки устройства
 echo ========================================
 echo.
-echo Ждите 50 секунд...
-echo.
-timeout /t 50 /nobreak
+
+call :wait_boot 180
+if errorlevel 1 (
+    echo ОШИБКА: устройство не загрузилось за 180 секунд
+    goto :fail
+)
 echo.
 echo Загрузка завершена! Подключаемся...
 echo.
@@ -219,7 +247,7 @@ if "!NEW_IP!"=="" (
     pause
     exit /b 1
 )
-echo !NEW_IP!|find ":" >nul
+echo !NEW_IP!|findstr /C:":" >nul
 if errorlevel 1 set "NEW_IP=!NEW_IP!:5555"
 set "DEV=!NEW_IP!"
 set "ADB=%ADB_EXE% -s !DEV!"
@@ -238,6 +266,9 @@ echo Проверка процессов:
 echo.
 echo Статус сервиса init:
 %ADB% shell "getprop init.svc.led_monitor"
+REM Если сервис не running — init скорее всего не разобрал/не принял led_monitor.rc
+%ADB% shell "getprop init.svc.led_monitor" | findstr /C:"running" >nul
+if errorlevel 1 echo   ВНИМАНИЕ: сервис led_monitor не в состоянии running - проверьте led_monitor.rc и режим SELinux (getenforce)
 echo.
 echo Логи watchdog:
 %ADB% shell "tail -5 /data/local/tmp/scripts/watchdog.log 2>/dev/null || echo 'Лог отсутствует'"
@@ -272,10 +303,25 @@ del "%TEMP%\led_wd_check.txt" >nul 2>&1
 set /p CL_STATUS=<"%TEMP%\led_cl_check.txt"
 del "%TEMP%\led_cl_check.txt" >nul 2>&1
 
+REM Сервис стартует скрипты через ~90 секунд после boot_completed:
+REM статус MISSING ожидаем активно, DEAD не ждём (сразу перезапускаем ниже)
+for /f "tokens=1 delims=:" %%a in ("!WD_STATUS!") do set "WD_STATE=%%a"
+if "!WD_STATE!"=="MISSING" (
+    call :wait_pid ALIVE "!WD_STATUS!" watchdog.pid 150
+    set "WD_STATUS=!_RES!"
+)
+for /f "tokens=1 delims=:" %%a in ("!CL_STATUS!") do set "CL_STATE=%%a"
+if "!CL_STATE!"=="MISSING" (
+    call :wait_pid ALIVE "!CL_STATUS!" cache_cleaner.pid 150
+    set "CL_STATUS=!_RES!"
+)
+
 echo   Watchdog: !WD_STATUS!
 echo   Cleaner:  !CL_STATUS!
 
-if "!WD_STATUS!"=="DEAD" (
+REM === Сравнение с DEAD:<pid>, разбор через for /f (как в harden.bat) ===
+for /f "tokens=1 delims=:" %%a in ("!WD_STATUS!") do set "WD_STATE=%%a"
+if "!WD_STATE!"=="DEAD" (
     echo.
     echo   Watchdog мёртв. Перезапускаем...
     %ADB% shell "rm -f /data/local/tmp/scripts/watchdog.pid"
@@ -284,7 +330,8 @@ if "!WD_STATUS!"=="DEAD" (
     echo   OK: перезапущен
 )
 
-if "!CL_STATUS!"=="DEAD" (
+for /f "tokens=1 delims=:" %%a in ("!CL_STATUS!") do set "CL_STATE=%%a"
+if "!CL_STATE!"=="DEAD" (
     echo.
     echo   Cleaner мёртв. Перезапускаем...
     %ADB% shell "rm -f /data/local/tmp/scripts/cache_cleaner.pid"
@@ -300,6 +347,67 @@ echo Финальная проверка PID-файлов:
 
 goto :end
 
+REM === push с проверкой кода возврата: при ошибке сразу выходим из подпрограммы ===
+:push_one
+"%ADB_EXE%" -s "%DEV%" push %1 "%~2"
+if errorlevel 1 (
+    echo ОШИБКА: не удалось отправить %~nx1 ^(%DEV% -^> %2^)
+    exit /b 1
+)
+echo   OK: %~nx1 -^> %2
+exit /b 0
+
+REM === Активное ожидание загрузки: ждём sys.boot_completed=1 вместо фиксированного таймера ===
+REM Использование: call :wait_boot 180
+:wait_boot
+set "WB_TIMEOUT=%~1"
+set /a WB_ELAPSED=0
+:wb_loop
+set "BOOT_V="
+if "%MODE%"=="wifi" "%ADB_EXE%" connect "%DEV%" >nul 2>&1
+REM ждём появления устройства в списке (макс. ~10 сек), затем читаем свойство загрузки
+"%ADB_EXE%" -s "%DEV%" wait-for-device >nul 2>&1
+for /f "delims=" %%V in ('%ADB% shell getprop sys.boot_completed 2^>nul') do set "BOOT_V=%%V"
+if "!BOOT_V!"=="1" (
+    echo   OK: устройство загрузилось ^(!WB_ELAPSED! сек^)
+    exit /b 0
+)
+if %WB_ELAPSED% geq %WB_TIMEOUT% (
+    echo   TIMEOUT: не дождались загрузки за %WB_TIMEOUT% сек
+    exit /b 1
+)
+set /a WB_ELAPSED+=5
+timeout /t 5 /nobreak >nul
+goto :wb_loop
+
+REM === Активное ожидание нужного статуса PID-файла ===
+REM Использование: call :wait_pid ALIVE "<текущий статус>" watchdog.pid 150
+REM Результат в переменной _RES
+:wait_pid
+set "_WANT=%~1"
+set "_RES=%~2"
+set "_PIDSUF=%~3"
+set "WP_TIMEOUT=%~4"
+set /a WP_ELAPSED=0
+:wp_loop
+if "!_RES:~0,6!"=="!_WANT!" exit /b 0
+if %WP_ELAPSED% geq %WP_TIMEOUT% exit /b 0
+set /a WP_ELAPSED+=5
+timeout /t 5 /nobreak >nul
+%ADB_EXE% -s !DEV! shell "if [ -f /data/local/tmp/scripts/%_PIDSUF% ]; then PID=$(cat /data/local/tmp/scripts/%_PIDSUF%); if kill -0 $PID 2>/dev/null; then echo ALIVE:$PID; else echo DEAD:$PID; fi; else echo MISSING; fi" > "%TEMP%\led_wp_check.txt" 2>nul
+set /p _RES=<"%TEMP%\led_wp_check.txt"
+del "%TEMP%\led_wp_check.txt" >nul 2>&1
+goto :wp_loop
+
+REM === Проверка файла на переводы строк CRLF (PowerShell читает байты: CR=13) ===
+:check_lf
+set "LF_FILE=%~1"
+set "LF_FILE_Q=!LF_FILE:'=''!"
+powershell -NoProfile -Command "$t=[IO.File]::ReadAllBytes('!LF_FILE_Q!'); foreach($b in $t){ if($b -eq 13){ exit 1 } }; exit 0" >nul 2>&1
+if not errorlevel 1 exit /b 0
+echo ОШИБКА: %~nx1 содержит Windows-переводы строк CRLF (или PowerShell недоступен). Сохраните файл в формате LF.
+exit /b 1
+
 :connect_retry
 set "TARGET=%~1"
 set "MAX=%~2"
@@ -307,19 +415,19 @@ set "ATTEMPT=0"
 
 :retry_loop
 set /a ATTEMPT+=1
-echo   Попытка подключения %ATTEMPT%/%MAX%...
-"%ADB_EXE%" connect %TARGET% >nul 2>&1
+echo   Попытка подключения !ATTEMPT!/!MAX!...
+"%ADB_EXE%" connect "%TARGET%" >nul 2>&1
 timeout /t 2 /nobreak >nul
-"%ADB_EXE%" -s %TARGET% shell id >nul 2>&1
+"%ADB_EXE%" -s "%TARGET%" shell id >nul 2>&1
 if not errorlevel 1 (
     echo   OK: подключено
     exit /b 0
 )
-if %ATTEMPT% lss %MAX% (
+if !ATTEMPT! lss !MAX! (
     timeout /t 3 /nobreak >nul
     goto :retry_loop
 )
-echo   ОШИБКА: не удалось подключиться после %MAX% попыток
+echo   ОШИБКА: не удалось подключиться после !MAX! попыток
 exit /b 1
 
 :fail

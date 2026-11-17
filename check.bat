@@ -22,7 +22,7 @@ if "%MODE%"=="wifi" (
     "%ADB_EXE%" connect "%DEV%" >nul 2>&1
 )
 %ADB% wait-for-device
-%ADB% shell id | find "uid=0" >nul
+%ADB% shell id | findstr /C:"uid=0" >nul
 if errorlevel 1 (
     echo ВНИМАНИЕ: root не получен.
 ) else (

@@ -30,7 +30,7 @@ if "%MODE%"=="wifi" (
 
 %ADB% wait-for-device
 
-%ADB% shell id | find "uid=0" >nul
+%ADB% shell id | findstr /C:"uid=0" >nul
 if errorlevel 1 (
     echo ОШИБКА: root не получен.
     pause
