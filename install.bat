@@ -26,7 +26,7 @@ if "%LOCAL_FAIL%"=="1" goto :fail
 echo Используем adb: %ADB_EXE%
 echo.
 echo ========================================
-echo  Установка скриптов на LED-экран
+echo  Установка скриптов на LED-экран (v2)
 echo ========================================
 echo  Устройство: %DEV%
 echo  Режим: %MODE%
@@ -63,8 +63,10 @@ echo   OK: uid=0 root
 
 echo [3/6] Монтирование /vendor в режим записи...
 %ADB% shell "mount -o rw,remount /vendor"
-REM Проверяем через mountpoint: на AOSP он возвращает 0 только если /vendor в rw
-%ADB% shell "mountpoint -w /vendor" >nul 2>&1
+REM v2: проверка через /proc/mounts — grep работает на устройстве, findstr на хосте.
+REM Прежний "mountpoint -w /vendor" всегда падал: флага -w в toybox нет,
+REM а конвейер "mount | grep | find" ломался от GNU find из PATH.
+%ADB% shell "grep ' /vendor ' /proc/mounts" | findstr /C:" rw," >nul 2>&1
 if errorlevel 1 goto :verity_needed
 
 echo   OK: /vendor доступен для записи
@@ -72,8 +74,10 @@ goto :upload_scripts
 
 :verity_needed
 echo   ВНИМАНИЕ: /vendor остался в режиме ro
+echo   Текущее состояние монтирования:
+%ADB% shell "grep ' /vendor ' /proc/mounts"
 echo   Пробуем отключить verity...
-%ADB% shell disable-verity
+"%ADB_EXE%" -s "%DEV%" disable-verity
 if errorlevel 1 echo   Предупреждение: disable-verity вернул ошибку, пробуем перезагрузку всё равно
 timeout /t 3 /nobreak >nul
 
@@ -99,8 +103,12 @@ pause >nul
 %ADB% reboot
 echo.
 echo Ожидание перезагрузки устройства...
+REM v2: wait_boot возвращает 2, если устройство не ответило за таймаут —
+REM в wifi-режиме это штатный случай "IP сменился после ребута",
+REM уводим в запрос нового IP вместо ложного "установка не удалась"
 call :wait_boot 180
 if errorlevel 1 (
+    if "%MODE%"=="wifi" goto :ask_new_ip
     echo ОШИБКА: устройство не загрузилось за 180 секунд
     goto :fail
 )
@@ -137,8 +145,14 @@ goto :reconnect_after_reboot
 :wait_usb
 echo.
 echo Ожидание подключения USB-устройства...
-"%ADB_EXE%" wait-for-device
-echo   OK: устройство подключено
+REM v2: без wait-for-device — он висит вечно, если устройство не вернётся;
+REM опрашиваем тем же wait_boot (adb shell по отсутствующему серийнику
+REM завершается мгновенно, таймаут реально достижим)
+call :wait_boot 180
+if errorlevel 1 (
+    echo ОШИБКА: USB-устройство не вернулось после перезагрузки
+    goto :fail
+)
 
 :reconnect_after_reboot
 %ADB% root
@@ -154,9 +168,11 @@ if "%MODE%"=="wifi" (
 echo.
 echo Повторное монтирование /vendor...
 %ADB% shell "mount -o rw,remount /vendor"
-%ADB% shell "mountpoint -w /vendor" >nul 2>&1
+%ADB% shell "grep ' /vendor ' /proc/mounts" | findstr /C:" rw," >nul 2>&1
 if errorlevel 1 (
     echo ОШИБКА: не удалось смонтировать /vendor в rw
+    echo Состояние:
+    %ADB% shell "grep ' /vendor ' /proc/mounts"
     pause
     exit /b 1
 )
@@ -178,10 +194,12 @@ call :push_one "%~dp0cache_cleaner.sh" /data/local/tmp/scripts/ || goto :fail
 call :push_one "%~dp0led_startup.sh" /vendor/etc/init/ || goto :fail
 call :push_one "%~dp0led_monitor.rc" /vendor/etc/init/ || goto :fail
 
-REM Финальная проверка формата загруженных файлов на устройстве (страховка):
-REM одна команда на все файлы, вывод BAD:<путь> для файлов с символами CR
-REM (шаблон CR собирается printf внутри shell-скрипта, без \r в тексте BAT)
-%ADB% shell "CR=$(printf '\\015'); for f in /data/local/tmp/scripts/network_watchdog.sh /data/local/tmp/scripts/cache_cleaner.sh /vendor/etc/init/led_startup.sh /vendor/etc/init/led_monitor.rc; do grep -q \"$CR\" \"$f\" && echo BAD:$f; done" > "%TEMP%\led_cr_check.txt" 2>nul
+REM Финальная проверка формата загруженных файлов на устройстве (страховка).
+REM v2: ОДИН обратный слэш в printf '\015' — toybox-printf раскрывает октальный
+REM код в байт CR. Прежние '\\015' давали литеральный текст "\015", grep его
+REM не находил ни в одном файле — проверка была мёртвой и всегда "проходила".
+REM Внутренних двойных кавычек нет специально: cmd разбирает их как границы аргументов.
+%ADB% shell "CR=$(printf '\015'); for f in /data/local/tmp/scripts/network_watchdog.sh /data/local/tmp/scripts/cache_cleaner.sh /vendor/etc/init/led_startup.sh /vendor/etc/init/led_monitor.rc; do grep -q $CR $f && echo BAD:$f; done" > "%TEMP%\led_cr_check.txt" 2>nul
 findstr /C:"BAD:" "%TEMP%\led_cr_check.txt" >nul 2>&1
 if not errorlevel 1 (
     echo ОШИБКА: эти файлы на устройстве содержат символы CR:
@@ -218,6 +236,7 @@ echo.
 
 call :wait_boot 180
 if errorlevel 1 (
+    if "%MODE%"=="wifi" goto :ask_ip_after_final_reboot
     echo ОШИБКА: устройство не загрузилось за 180 секунд
     goto :fail
 )
@@ -295,11 +314,12 @@ timeout /t 3 /nobreak >nul
 if "%MODE%"=="wifi" "%ADB_EXE%" connect "!DEV!" >nul 2>&1
 %ADB% wait-for-device
 
-%ADB_EXE% -s !DEV! shell "if [ -f /data/local/tmp/scripts/watchdog.pid ]; then PID=$(cat /data/local/tmp/scripts/watchdog.pid); if kill -0 $PID 2>/dev/null; then echo ALIVE:$PID; else echo DEAD:$PID; fi; else echo MISSING; fi" > "%TEMP%\led_wd_check.txt" 2>nul
+REM v2: сверка cmdline — lone kill -0 даёт ложное "жив" при переиспользовании PID после ребута
+%ADB_EXE% -s !DEV! shell "if [ -f /data/local/tmp/scripts/watchdog.pid ]; then PID=$(cat /data/local/tmp/scripts/watchdog.pid); if kill -0 $PID 2>/dev/null && grep -q network_watchdog /proc/$PID/cmdline 2>/dev/null; then echo ALIVE:$PID; else echo DEAD:$PID; fi; else echo MISSING; fi" > "%TEMP%\led_wd_check.txt" 2>nul
 set /p WD_STATUS=<"%TEMP%\led_wd_check.txt"
 del "%TEMP%\led_wd_check.txt" >nul 2>&1
 
-%ADB_EXE% -s !DEV! shell "if [ -f /data/local/tmp/scripts/cache_cleaner.pid ]; then PID=$(cat /data/local/tmp/scripts/cache_cleaner.pid); if kill -0 $PID 2>/dev/null; then echo ALIVE:$PID; else echo DEAD:$PID; fi; else echo MISSING; fi" > "%TEMP%\led_cl_check.txt" 2>nul
+%ADB_EXE% -s !DEV! shell "if [ -f /data/local/tmp/scripts/cache_cleaner.pid ]; then PID=$(cat /data/local/tmp/scripts/cache_cleaner.pid); if kill -0 $PID 2>/dev/null && grep -q cache_cleaner /proc/$PID/cmdline 2>/dev/null; then echo ALIVE:$PID; else echo DEAD:$PID; fi; else echo MISSING; fi" > "%TEMP%\led_cl_check.txt" 2>nul
 set /p CL_STATUS=<"%TEMP%\led_cl_check.txt"
 del "%TEMP%\led_cl_check.txt" >nul 2>&1
 
@@ -357,24 +377,27 @@ if errorlevel 1 (
 echo   OK: %~nx1 -^> %2
 exit /b 0
 
-REM === Активное ожидание загрузки: ждём sys.boot_completed=1 вместо фиксированного таймера ===
-REM Использование: call :wait_boot 180
+REM === v2: Активное ожидание загрузки — опрос sys.boot_completed.
+REM БЕЗ wait-for-device: при недоступном устройстве он блокируется
+REM НАВСЕГДА и таймаут недостижим. adb shell по отсутствующему
+REM серийнику завершается ошибкой мгновенно, поэтому цикл
+REM действительно укладывается в таймаут.
+REM Возврат: 0 — загрузилась, 2 — нет ответа за таймаут.
 :wait_boot
 set "WB_TIMEOUT=%~1"
 set /a WB_ELAPSED=0
 :wb_loop
 set "BOOT_V="
 if "%MODE%"=="wifi" "%ADB_EXE%" connect "%DEV%" >nul 2>&1
-REM ждём появления устройства в списке (макс. ~10 сек), затем читаем свойство загрузки
-"%ADB_EXE%" -s "%DEV%" wait-for-device >nul 2>&1
-for /f "delims=" %%V in ('%ADB% shell getprop sys.boot_completed 2^>nul') do set "BOOT_V=%%V"
-if "!BOOT_V!"=="1" (
+REM adb shell присылает CRLF — сравниваем первый символ, хвост не важен
+for /f "tokens=1 delims= " %%V in ('%ADB% shell getprop sys.boot_completed 2^>nul') do set "BOOT_V=%%V"
+if "!BOOT_V:~0,1!"=="1" (
     echo   OK: устройство загрузилось ^(!WB_ELAPSED! сек^)
     exit /b 0
 )
 if %WB_ELAPSED% geq %WB_TIMEOUT% (
-    echo   TIMEOUT: не дождались загрузки за %WB_TIMEOUT% сек
-    exit /b 1
+    echo   TIMEOUT: нет ответа от устройства за %WB_TIMEOUT% сек
+    exit /b 2
 )
 set /a WB_ELAPSED+=5
 timeout /t 5 /nobreak >nul

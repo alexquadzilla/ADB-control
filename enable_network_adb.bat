@@ -83,4 +83,4 @@ echo.
 echo После обслуживания можно отключить ADB:
 echo   harden.bat %DEV%
 echo.
-pause
+pause

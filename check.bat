@@ -10,7 +10,7 @@ if errorlevel 1 (
 
 echo.
 echo ========================================
-echo  Статус: %DEV%
+echo  Статус: %DEV% (v2)
 echo  Режим: %MODE%
 echo ========================================
 echo.
@@ -36,8 +36,9 @@ echo [1] Проверка PID-файлов:
 
 echo.
 echo [2] Проверка живости процессов:
-%ADB% shell "if [ -f /data/local/tmp/scripts/watchdog.pid ]; then PID=$(cat /data/local/tmp/scripts/watchdog.pid); if kill -0 $PID 2>/dev/null; then echo '  Watchdog: жив (PID '$PID')'; else echo '  Watchdog: мёртв (PID '$PID')'; fi; else echo '  Watchdog: PID-файл отсутствует'; fi"
-%ADB% shell "if [ -f /data/local/tmp/scripts/cache_cleaner.pid ]; then PID=$(cat /data/local/tmp/scripts/cache_cleaner.pid); if kill -0 $PID 2>/dev/null; then echo '  Cleaner: жив (PID '$PID')'; else echo '  Cleaner: мёртв (PID '$PID')'; fi; else echo '  Cleaner: PID-файл отсутствует'; fi"
+REM v2: сверка cmdline — kill -0 один даёт ложное "жив" при переиспользовании PID
+%ADB% shell "if [ -f /data/local/tmp/scripts/watchdog.pid ]; then PID=$(cat /data/local/tmp/scripts/watchdog.pid); if kill -0 $PID 2>/dev/null && grep -q network_watchdog /proc/$PID/cmdline 2>/dev/null; then echo '  Watchdog: жив (PID '$PID')'; else echo '  Watchdog: мёртв/несовпадает (PID '$PID')'; fi; else echo '  Watchdog: PID-файл отсутствует'; fi"
+%ADB% shell "if [ -f /data/local/tmp/scripts/cache_cleaner.pid ]; then PID=$(cat /data/local/tmp/scripts/cache_cleaner.pid); if kill -0 $PID 2>/dev/null && grep -q cache_cleaner /proc/$PID/cmdline 2>/dev/null; then echo '  Cleaner: жив (PID '$PID')'; else echo '  Cleaner: мёртв/несовпадает (PID '$PID')'; fi; else echo '  Cleaner: PID-файл отсутствует'; fi"
 
 echo.
 echo [3] Watchdog log:
@@ -56,17 +57,21 @@ echo [6] Последняя очистка кэша:
 %ADB% shell "cat /data/local/tmp/scripts/last_clean_day.txt 2>/dev/null || echo 'Не выполнялась'"
 
 echo.
-echo [7] Статус сервиса:
+echo [7] Кэшированный шлюз watchdog:
+%ADB% shell "cat /data/local/tmp/scripts/gateway.txt 2>/dev/null || echo 'ещё не записан'"
+
+echo.
+echo [8] Статус сервиса:
 %ADB% shell "getprop init.svc.led_monitor"
 
 echo.
-echo [8] Сетевой ADB:
+echo [9] Сетевой ADB:
 %ADB% shell "echo -n '  persist.adb.tcp.port: '; getprop persist.adb.tcp.port"
 %ADB% shell "echo -n '  service.adb.tcp.port: '; getprop service.adb.tcp.port"
 %ADB% shell "echo -n '  adb_wifi_enabled: '; settings get global adb_wifi_enabled"
 
 echo.
-echo [9] SELinux:
+echo [10] SELinux:
 %ADB% shell "getenforce"
 
 echo.

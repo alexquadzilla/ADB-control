@@ -107,4 +107,4 @@ exit /b 0
 :cancelled
 echo Отменено.
 pause
-exit /b 0
+exit /b 0

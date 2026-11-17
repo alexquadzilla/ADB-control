@@ -10,7 +10,7 @@ if errorlevel 1 (
 
 echo.
 echo ========================================
-echo  Защита устройства LED-экрана
+echo  Защита устройства LED-экрана (v2)
 echo ========================================
 echo  Устройство: %DEV%
 echo  Режим: %MODE%
@@ -33,17 +33,16 @@ if errorlevel 1 (
 )
 echo   OK: root получен
 
-REM === Проверка watchdog через PID-файл ===
+REM === Проверка watchdog через PID-файл + cmdline ===
 echo.
 echo [2/7] Проверка watchdog...
-%ADB_EXE% -s %DEV% shell "if [ -f /data/local/tmp/scripts/watchdog.pid ]; then PID=$(cat /data/local/tmp/scripts/watchdog.pid); if kill -0 $PID 2>/dev/null; then echo ALIVE:$PID; else echo DEAD:$PID; fi; else echo MISSING; fi" > "%TEMP%\led_wd_check.txt" 2>nul
+%ADB_EXE% -s %DEV% shell "if [ -f /data/local/tmp/scripts/watchdog.pid ]; then PID=$(cat /data/local/tmp/scripts/watchdog.pid); if kill -0 $PID 2>/dev/null && grep -q network_watchdog /proc/$PID/cmdline 2>/dev/null; then echo ALIVE:$PID; else echo DEAD:$PID; fi; else echo MISSING; fi" > "%TEMP%\led_wd_check.txt" 2>nul
 set /p WD_STATUS=<"%TEMP%\led_wd_check.txt"
 del "%TEMP%\led_wd_check.txt" >nul 2>&1
 
 if "!WD_STATUS!"=="MISSING" (
     echo   ВНИМАНИЕ: watchdog не запущен (PID-файл отсутствует)
-    echo   Защита будет установлена, но watchdog не будет работать.
-    echo   Перезагрузите устройство для запуска watchdog.
+    echo   Перед отключением ADB он будет перезапущен (шаг 6).
     set "WD_OK=0"
 ) else (
     for /f "tokens=1,2 delims=:" %%a in ("!WD_STATUS!") do (
@@ -55,15 +54,15 @@ if "!WD_STATUS!"=="MISSING" (
         set "WD_OK=1"
     ) else (
         echo   ВНИМАНИЕ: watchdog мёртв (PID !WD_PID^)
-        echo   Перезагрузите устройство для перезапуска watchdog.
+        echo   Перед отключением ADB он будет перезапущен (шаг 6).
         set "WD_OK=0"
     )
 )
 
-REM === Проверка cleaner через PID-файл ===
+REM === Проверка cleaner через PID-файл + cmdline ===
 echo.
 echo [3/7] Проверка cleaner...
-%ADB_EXE% -s %DEV% shell "if [ -f /data/local/tmp/scripts/cache_cleaner.pid ]; then PID=$(cat /data/local/tmp/scripts/cache_cleaner.pid); if kill -0 $PID 2>/dev/null; then echo ALIVE:$PID; else echo DEAD:$PID; fi; else echo MISSING; fi" > "%TEMP%\led_cl_check.txt" 2>nul
+%ADB_EXE% -s %DEV% shell "if [ -f /data/local/tmp/scripts/cache_cleaner.pid ]; then PID=$(cat /data/local/tmp/scripts/cache_cleaner.pid); if kill -0 $PID 2>/dev/null && grep -q cache_cleaner /proc/$PID/cmdline 2>/dev/null; then echo ALIVE:$PID; else echo DEAD:$PID; fi; else echo MISSING; fi" > "%TEMP%\led_cl_check.txt" 2>nul
 set /p CL_STATUS=<"%TEMP%\led_cl_check.txt"
 del "%TEMP%\led_cl_check.txt" >nul 2>&1
 
@@ -143,13 +142,6 @@ if "!WD_OK!"=="0" if "!STARTUP_OK!"=="0" (
     exit /b 1
 )
 
-if "!WD_OK!"=="0" (
-    echo ВНИМАНИЕ: watchdog не запущен.
-    echo После отключения ADB мониторинг сети работать не будет.
-    echo Рекомендуется перезагрузить устройство для запуска watchdog.
-    echo.
-)
-
 if "!STARTUP_OK!"=="0" (
     echo ВНИМАНИЕ: led_startup.sh не настроен.
     echo После перезагрузки ADB останется включённым.
@@ -160,21 +152,20 @@ if "!STARTUP_OK!"=="0" (
 echo Ждите 10 секунд
 echo.
 timeout /t 10 /nobreak
-echo
 echo.
 echo Применяем защиту...
 echo.
 
-REM === Отключение ADB ===
-echo [6/7] Отключение сетевого ADB...
-%ADB% shell "setprop persist.adb.tcp.port 0"
-%ADB% shell "setprop service.adb.tcp.port 0"
-%ADB% shell "settings put global adb_wifi_enabled 0"
-echo   OK: настройки применены
+REM === v2: [6/7] Гарантируем живость watchdog и cleaner ДО отключения ADB.
+REM Если скрипт умер — перезапускаем СЕЙЧАС, пока соединение ещё доступно:
+REM после ctl.restart adbd в wifi-режиме до устройства уже не достучаться.
+echo [6/7] Проверка/перезапуск watchdog и cleaner перед отключением...
+call :ensure_alive watchdog watchdog.pid network_watchdog.sh
+call :ensure_alive cleaner  cache_cleaner.pid cache_cleaner.sh
 
-REM === Перезапуск adbd ===
+REM === [7/7] Отключение сетевого ADB + перезапуск adbd ===
 echo.
-echo [7/7] Перезапуск adbd...
+echo [7/7] Отключение сетевого ADB...
 echo.
 echo ВНИМАНИЕ:
 if "%MODE%"=="wifi" (
@@ -185,32 +176,24 @@ if "%MODE%"=="wifi" (
     echo   USB-соединение может кратко переподключиться.
 )
 echo.
+%ADB% shell "setprop persist.adb.tcp.port 0"
+%ADB% shell "setprop service.adb.tcp.port 0"
+%ADB% shell "settings put global adb_wifi_enabled 0"
+echo   OK: настройки применены (persist.adb.tcp.port=0, service.adb.tcp.port=0, adb_wifi_enabled=0)
+
 %ADB% shell "setprop ctl.restart adbd" >nul 2>&1
 
 REM === Ждём 5 секунд ===
 timeout /t 5 /nobreak >nul
 
-REM === Проверка, что watchdog продолжает работать ===
+REM === v2: Контроль процессов после перезапуска adbd.
+REM В wifi-режиме невозможен: сетевой ADB только что выключен.
+REM В usb-режиме при необходимости перезапускаем (ensure_alive).
 if "%MODE%"=="usb" (
     echo.
-    echo Проверка watchdog после отключения ADB...
-    %ADB_EXE% -s %DEV% shell "if [ -f /data/local/tmp/scripts/watchdog.pid ]; then PID=$(cat /data/local/tmp/scripts/watchdog.pid); if kill -0 $PID 2>/dev/null; then echo ALIVE:$PID; else echo DEAD:$PID; fi; else echo MISSING; fi" > "%TEMP%\led_wd_check.txt" 2>nul
-    set /p WD_STATUS=<"%TEMP%\led_wd_check.txt"
-    del "%TEMP%\led_wd_check.txt" >nul 2>&1
-    
-    if "!WD_STATUS!"=="MISSING" (
-        echo   ВНИМАНИЕ: watchdog.pid отсутствует
-    ) else (
-        for /f "tokens=1,2 delims=:" %%a in ("!WD_STATUS!") do (
-            set "WD_STATE=%%a"
-            set "WD_PID=%%b"
-        )
-        if "!WD_STATE!"=="ALIVE" (
-            echo   OK: watchdog продолжает работать (PID !WD_PID^)
-        ) else (
-            echo   ВНИМАНИЕ: watchdog остановился
-        )
-    )
+    echo Контроль процессов после перезапуска adbd...
+    call :ensure_alive watchdog watchdog.pid network_watchdog.sh
+    call :ensure_alive cleaner  cache_cleaner.pid cache_cleaner.sh
 )
 
 echo.
@@ -219,6 +202,7 @@ echo  ЗАЩИТА АКТИВИРОВАНА
 echo ========================================
 echo.
 echo Что сделано:
+echo   - watchdog и cleaner работают (перезапущены при необходимости)
 echo   - persist.adb.tcp.port = 0
 echo   - service.adb.tcp.port = 0
 echo   - adb_wifi_enabled = 0
@@ -244,4 +228,24 @@ echo После следующей перезагрузки led_startup.sh
 echo автоматически отключит ADB снова.
 echo.
 pause
+exit /b 0
+
+REM === v2: Подпрограмма: убедиться, что скрипт жив; при необходимости перезапустить.
+REM Использование: call :ensure_alive watchdog watchdog.pid network_watchdog.sh
+REM Проверка сверяет cmdline процесса — lone kill -0 даёт ложное "жив"
+REM при переиспользовании номера PID после перезагрузки.
+:ensure_alive
+set "EA_KIND=%~1"
+set "EA_PIDFILE=/data/local/tmp/scripts/%~2"
+set "EA_SCRIPT=%~3"
+%ADB_EXE% -s %DEV% shell "if [ -f %EA_PIDFILE% ]; then PID=$(cat %EA_PIDFILE%); if kill -0 $PID 2>/dev/null && grep -q %EA_SCRIPT% /proc/$PID/cmdline 2>/dev/null; then echo ALIVE:$PID; else echo DEAD:$PID; fi; else echo MISSING; fi" > "%TEMP%\led_ea_check.txt" 2>nul
+set /p EA_RES=<"%TEMP%\led_ea_check.txt"
+del "%TEMP%\led_ea_check.txt" >nul 2>&1
+echo   %EA_KIND%: !EA_RES!
+if not "!EA_RES:~0,5!"=="ALIVE" (
+    echo   %EA_KIND% не жив — перезапускаем...
+    %ADB% shell "rm -f %EA_PIDFILE%; nohup /system/bin/sh /data/local/tmp/scripts/%EA_SCRIPT% >/dev/null 2>&1 </dev/null &"
+    timeout /t 2 /nobreak >nul
+    echo   OK: %EA_KIND% перезапущен
+)
 exit /b 0

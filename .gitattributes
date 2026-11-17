@@ -1,0 +1,8 @@
+# Формат строк: скрипты для Android (.sh/.rc) обязаны быть в LF,
+# BAT-файлы — в CRLF. Без этого файла свежий клон на Windows
+# с core.autocrlf=true превратит .sh в CRLF, и led_monitor.rc
+# не будет разобран init, а shebang .sh сломается.
+*.sh  text eol=lf
+*.rc  text eol=lf
+*.bat text eol=crlf
+*.md  text

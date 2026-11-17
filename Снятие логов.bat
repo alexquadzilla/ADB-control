@@ -1,6 +1,8 @@
 @echo off
 setlocal
 title Signage Logs Tool (merged)
+REM v2: логи всегда рядом со скриптом, а не в текущем каталоге cmd (см. Инструкция 6.6)
+cd /d "%~dp0"
 REM ================= БАЗОВЫЕ ПЕРЕМЕННЫЕ =================
 set "ADB=adb"
 set "OUT="
@@ -85,10 +87,13 @@ echo Requesting root (adb root)...
 "%ADB%" -s "%SERIAL%" root > "%OUT%\adb_root.txt" 2>&1
 type "%OUT%\adb_root.txt"
 timeout /t 3 /nobreak >nul
-if /I "%CONNTYPE%"=="net" "%ADB%" connect %SERIAL% >nul 2>&1
 set /a TRY=0
 :wait_loop
 set /a TRY+=1
+REM v2: connect перенесён ВНУТРЬ цикла ожидания — adb root перезапускает adbd,
+REM и единственный connect до цикла мог попасть на момент перезапуска,
+REM после чего все 10 попыток shell падали и скрипт выходил с ошибкой
+if /I "%CONNTYPE%"=="net" "%ADB%" connect %SERIAL% >nul 2>&1
 "%ADB%" -s "%SERIAL%" shell echo ready >nul 2>&1
 if not errorlevel 1 goto :root_stage
 if %TRY% GEQ 10 (
@@ -202,36 +207,7 @@ REM ---- 6. FULL SNAPSHOT ----
 :opt6
 echo.
 echo [SNAPSHOT] start...
-REM --- Блок: Wi-Fi углублённо ---
-"%ADB%" -s "%SERIAL%" shell "cmd wifi status" > "%OUT%\wifi_status.txt" 2>&1
-"%ADB%" -s "%SERIAL%" shell "cmd wifi list-scan-results" > "%OUT%\wifi_scan.txt" 2>&1
-"%ADB%" -s "%SERIAL%" shell "dumpsys wifi" > "%OUT%\wifi_dumpsys.txt" 2>&1
-"%ADB%" -s "%SERIAL%" shell "dumpsys connectivity" > "%OUT%\connectivity.txt" 2>&1
-"%ADB%" -s "%SERIAL%" shell "dumpsys dhcp" > "%OUT%\dhcp.txt" 2>&1
-"%ADB%" -s "%SERIAL%" shell "iw dev wlan0 link" > "%OUT%\iw_link.txt" 2>&1
-"%ADB%" -s "%SERIAL%" shell "cat /proc/net/wireless; cat /proc/net/dev" > "%OUT%\net_dev.txt" 2>&1
-"%ADB%" -s "%SERIAL%" shell "ip -s link show wlan0; ip addr show wlan0; ip route" > "%OUT%\ip_stats.txt" 2>&1
-"%ADB%" -s "%SERIAL%" shell "%SHPREFIX% sh -c 'cat /proc/net/rwnx/* 2>/dev/null; cat /sys/kernel/debug/aicwf/* 2>/dev/null'" > "%OUT%\wifi_driver_dbg.txt" 2>&1
-REM --- Блок: причины ребутов и крашей ---
-"%ADB%" -s "%SERIAL%" shell "getprop ro.boot.bootreason; cat /proc/uptime" > "%OUT%\boot_reason.txt" 2>&1
-"%ADB%" -s "%SERIAL%" shell "%SHPREFIX% sh -c 'ls -l /data/tombstones /data/anr 2>/dev/null'" > "%OUT%\crash_list.txt" 2>&1
-"%ADB%" -s "%SERIAL%" shell "dumpsys dropbox --print data_app_crash,system_server_crash,system_server_watchdog,lastkmsg" > "%OUT%\dropbox.txt" 2>&1
-"%ADB%" -s "%SERIAL%" shell "%SHPREFIX% sh -c 'mkdir -p /data/local/tmp/diag/pstore; cp /sys/fs/pstore/* /data/local/tmp/diag/pstore/ 2>/dev/null'" >nul 2>&1
-"%ADB%" -s "%SERIAL%" pull /data/local/tmp/diag/pstore "%OUT%\pstore" >nul 2>&1
-for /f "delims=" %%f in ('"%ADB%" -s "%SERIAL%" shell "ls -t /data/tombstones/tombstone_* 2>/dev/null | head -2"') do "%ADB%" -s "%SERIAL%" pull "%%f" "%OUT%\" >nul 2>&1
-REM --- Блок: накопители ---
-"%ADB%" -s "%SERIAL%" shell "df -h" > "%OUT%\df.txt" 2>&1
-"%ADB%" -s "%SERIAL%" shell "cat /proc/diskstats" > "%OUT%\diskstats.txt" 2>&1
-"%ADB%" -s "%SERIAL%" shell "cat /sys/class/mmc_host/mmc0/mmc0:0001/life_time /sys/class/mmc_host/mmc0/mmc0:0001/pre_eol_info 2>/dev/null" > "%OUT%\emmc_health.txt" 2>&1
-REM --- Блок: система / тепло / питание (батареи нет: dumpsys battery = состояние внешнего БП/AC) ---
-"%ADB%" -s "%SERIAL%" shell "getprop" > "%OUT%\getprop.txt" 2>&1
-"%ADB%" -s "%SERIAL%" shell "cat /proc/loadavg; cat /proc/meminfo; cat /proc/swaps" > "%OUT%\memory.txt" 2>&1
-"%ADB%" -s "%SERIAL%" shell "sh -c 'for z in /sys/class/thermal/thermal_zone*; do [ -d $z ]|| continue; echo === $z ===; cat $z/type 2>/dev/null; cat $z/temp 2>/dev/null; done'" > "%OUT%\thermal_snapshot.txt" 2>&1
-"%ADB%" -s "%SERIAL%" shell "%SHPREFIX% sh -c 'cat /sys/kernel/mm/ksm/run /sys/kernel/mm/ksm/full_scans 2>/dev/null'" > "%OUT%\ksm.txt" 2>&1
-"%ADB%" -s "%SERIAL%" shell "sh -c 'top -b -n 1 | head -60'" > "%OUT%\top.txt" 2>&1
-"%ADB%" -s "%SERIAL%" shell "ps -A -T -o PID,TID,STAT,PCPU,PMEM,NAME" > "%OUT%\threads.txt" 2>&1
-"%ADB%" -s "%SERIAL%" shell "%SHPREFIX% sh -c 'cat /sys/kernel/debug/usb/devices 2>/dev/null'" > "%OUT%\usb_devices.txt" 2>&1
-"%ADB%" -s "%SERIAL%" shell "dumpsys battery" > "%OUT%\power_ac.txt" 2>&1
+call :snapshot_block
 echo [SNAPSHOT] done: %OUT%
 goto :menu
 REM ---- 8. ПОСЛЕДОВАТЕЛЬНОСТЬ 1 + 4 + 5 + 6 ----
@@ -252,12 +228,19 @@ echo Reading thermal zones...
 echo [OK] %OUT%\thermal_snapshot_fixed.txt
 echo.
 echo [SNAPSHOT] start...
+call :snapshot_block
+echo [SNAPSHOT] done: %OUT%
+echo.
+echo [SEQ] Sequence 1, 4, 5, 6 complete: %OUT%
+goto :menu
+REM ---- v2: блок снимка вынесен в подпрограмму (раньше дублировался в п.6 и п.8) ----
+REM ---- dumpsys dhcp удалён: сервиса не существует, файл всегда был пуст ----
+:snapshot_block
 REM --- Блок: Wi-Fi углублённо ---
 "%ADB%" -s "%SERIAL%" shell "cmd wifi status" > "%OUT%\wifi_status.txt" 2>&1
 "%ADB%" -s "%SERIAL%" shell "cmd wifi list-scan-results" > "%OUT%\wifi_scan.txt" 2>&1
 "%ADB%" -s "%SERIAL%" shell "dumpsys wifi" > "%OUT%\wifi_dumpsys.txt" 2>&1
 "%ADB%" -s "%SERIAL%" shell "dumpsys connectivity" > "%OUT%\connectivity.txt" 2>&1
-"%ADB%" -s "%SERIAL%" shell "dumpsys dhcp" > "%OUT%\dhcp.txt" 2>&1
 "%ADB%" -s "%SERIAL%" shell "iw dev wlan0 link" > "%OUT%\iw_link.txt" 2>&1
 "%ADB%" -s "%SERIAL%" shell "cat /proc/net/wireless; cat /proc/net/dev" > "%OUT%\net_dev.txt" 2>&1
 "%ADB%" -s "%SERIAL%" shell "ip -s link show wlan0; ip addr show wlan0; ip route" > "%OUT%\ip_stats.txt" 2>&1
@@ -282,10 +265,7 @@ REM --- Блок: система / тепло / питание (батареи �
 "%ADB%" -s "%SERIAL%" shell "ps -A -T -o PID,TID,STAT,PCPU,PMEM,NAME" > "%OUT%\threads.txt" 2>&1
 "%ADB%" -s "%SERIAL%" shell "%SHPREFIX% sh -c 'cat /sys/kernel/debug/usb/devices 2>/dev/null'" > "%OUT%\usb_devices.txt" 2>&1
 "%ADB%" -s "%SERIAL%" shell "dumpsys battery" > "%OUT%\power_ac.txt" 2>&1
-echo [SNAPSHOT] done: %OUT%
-echo.
-echo [SEQ] Sequence 1, 4, 5, 6 complete: %OUT%
-goto :menu
+exit /b 0
 :quit
 echo.
 if /I "%CONNTYPE%"=="net" "%ADB%" disconnect %SERIAL% >nul 2>&1
