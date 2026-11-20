@@ -26,7 +26,7 @@ if "%LOCAL_FAIL%"=="1" goto :fail
 echo Используем adb: %ADB_EXE%
 echo.
 echo ========================================
-echo  Установка скриптов на LED-экран (v2.1)
+echo  Установка скриптов на LED-экран (v2.2)
 echo ========================================
 echo  Устройство: %DEV%
 echo  Режим: %MODE%
@@ -320,15 +320,20 @@ REM уже получен). led_startup.sh на следующих загруз�
 REM так что безопасности это не ломает.
 :save_reconnect_info
 if /i "%MODE%"=="wifi" (
-    for /f "tokens=1 delims=:" %%a in ("%DEV%") do set "OLD_IP=%%a"
+    for /f "tokens=1,2 delims=:" %%a in ("%DEV%") do (set "OLD_IP=%%a"& set "OLD_PORT=%%b")
+    if not defined OLD_PORT set "OLD_PORT=%PORT%"
     for /f "tokens=1-3 delims=." %%a in ("!OLD_IP!") do set "SUBNET=%%a.%%b.%%c"
     set "DEV_MAC="
-    for /f "usebackq delims=" %%a in (`%ADB% shell cat /sys/class/net/wlan0/address`) do set "DEV_MAC=%%a"
+    REM v2.2: adb в for /f — БЕЗ кавычек вокруг пути (PATH добавлен в
+    REM _adb_target.bat). Раньше здесь был путь в кавычках: cmd /c внутри
+    REM for /f срезает крайние кавычки, и команда с 4 кавычками падала
+    REM с "The filename, directory name, or volume label syntax is incorrect".
+    for /f "delims=" %%a in ('adb -s "%DEV%" shell cat /sys/class/net/wlan0/address 2^>nul') do set "DEV_MAC=%%a"
     REM MAC из sysfs: 74:24:ca:41:8e:bd -> формат arp -a (74-24-ca-...):
     set "DEV_MAC=!DEV_MAC:~0,17!"
     set "DEV_MAC=!DEV_MAC::=-!"
     if not "!DEV_MAC:~2,1!"=="-" set "DEV_MAC="
-    %ADB% shell setprop persist.adb.tcp.port 5555 >nul 2>&1
+    %ADB% shell setprop persist.adb.tcp.port %PORT% >nul 2>&1
 )
 exit /b 0
 
@@ -339,10 +344,10 @@ REM FIND_NEXT задаёт, куда идти после успешного по
 REM reconnect_after_reboot (после первого ребута) или final_check (после финального).
 :find_new_ip
 echo.
-echo Пробуем прежний адрес !OLD_IP!:5555 ...
-call :connect_retry "!OLD_IP!:5555" 1
+echo Пробуем прежний адрес !OLD_IP!:!OLD_PORT! ...
+call :connect_retry "!OLD_IP!:!OLD_PORT!" 1
 if not errorlevel 1 (
-    set "DEV=!OLD_IP!:5555"
+    set "DEV=!OLD_IP!:!OLD_PORT!"
     set "ADB=%ADB_EXE% -s !DEV!"
     goto :%FIND_NEXT%
 )
@@ -366,7 +371,7 @@ echo   - Настройки - О планшете - Статус - IP-адрес
 echo   - Список клиентов вашего роутера
 echo.
 set "NEW_IP="
-set /p NEW_IP=Новый IP-адрес: 
+set /p NEW_IP=Новый IP-адрес (можно с портом, напр. 192.168.1.4:5555): 
 if "!NEW_IP!"=="" (
     echo ОШИБКА: IP не указан
     goto :fail
@@ -374,7 +379,7 @@ if "!NEW_IP!"=="" (
 
 :apply_new_ip
 echo !NEW_IP!|findstr /C:":" >nul
-if errorlevel 1 set "NEW_IP=!NEW_IP!:5555"
+if errorlevel 1 set "NEW_IP=!NEW_IP!:!PORT!"
 set "DEV=!NEW_IP!"
 set "ADB=%ADB_EXE% -s !DEV!"
 echo Подключаемся к !DEV! ...
@@ -407,8 +412,15 @@ set /a WB_ELAPSED=0
 set "BOOT_V="
 if "%MODE%"=="wifi" "%ADB_EXE%" connect "%DEV%" >nul 2>&1
 set "DEV_SEEN="
-for /f "tokens=1,2" %%A in ('"%ADB_EXE%" devices 2^>nul ^| findstr /V /C:"List of"') do if /I "%%A"=="%DEV%" set "DEV_SEEN=%%B"
-if /I "!DEV_SEEN!"=="device" for /f "tokens=1 delims= " %%V in ('%ADB% shell getprop sys.boot_completed 2^>nul') do set "BOOT_V=%%V"
+REM v2.2: adb в for /f — БЕЗ кавычек вокруг пути. Обе прежние строки
+REM ('"%ADB_EXE%" devices ...' и '%ADB% shell getprop ...') содержали
+REM цитированный путь: cmd /c внутри for /f срезает крайние кавычки,
+REM первая строка падала с "The filename ... is incorrect", вторая
+REM молча возвращала пустоту (wait_boot был слеп, install всегда
+REM досиживал таймаут и просил IP вручную). PATH с каталогом adb
+REM добавляется в _adb_target.bat.
+for /f "tokens=1,2" %%A in ('adb devices 2^>nul ^| findstr /V /C:"List of"') do if /I "%%A"=="%DEV%" set "DEV_SEEN=%%B"
+if /I "!DEV_SEEN!"=="device" for /f "tokens=1 delims= " %%V in ('adb -s "%DEV%" shell getprop sys.boot_completed 2^>nul') do set "BOOT_V=%%V"
 REM adb shell присылает CRLF — сравниваем первый символ, хвост не важен
 if "!BOOT_V:~0,1!"=="1" (
     echo   OK: устройство загрузилось ^(!WB_ELAPSED! сек^)

@@ -80,6 +80,34 @@ deploy.bat usb                     :: первое USB-устройство
 `gateway.txt`; cleaner: `cache_cleaner.log`, `cache_cleaner.pid`,
 `last_clean_day.txt`.
 
+## Changelog v2.2 (фикс «The filename … is incorrect» и ввод порта)
+
+**Причина ошибки на Windows 11:** внутри `for /f` команда исполняется
+через `cmd /c`, который при старте с кавычки срезает крайние кавычки.
+Строки вида `'"C:\...\adb.exe" -s "IP:5555" shell …'` (4 кавычки) после
+срезания превращались в мусор: `…adb.exe" -s "IP:5555 shell …` →
+"The filename, directory name, or volume label syntax is incorrect"
+или молча пустой вывод. Из-за второй формы `:wait_boot` никогда не
+видел `sys.boot_completed=1` — install.bat всегда досиживал таймаут
+180 с и просил IP вручную.
+
+**Исправление:** каталог adb добавляется первым в PATH процесса
+(`_adb_target.bat`), и во всех `for /f` adb вызывается **без кавычек**:
+`in ('adb -s "%DEV%" shell …')`. Проверено тестом на Windows 11:
+старые формы падают/молчат, новая — возвращает данные.
+
+**Ввод порта:** во всех приглашениях ручного ввода IP можно указывать
+`IP:порт` (без порта — берётся текущий PORT, по умолчанию 5555):
+- `_adb_target.bat :ASK_IP` — подсказка в приглашении;
+- `install.bat :ask_new_ip` — подсказка; `:save_reconnect_info`
+  запоминает и порт (`OLD_PORT`), `:find_new_ip` переподключается на
+  прежний `IP:PORT`, `persist.adb.tcp.port` ставится на текущий порт
+  (а не захардкоженный 5555), `:apply_new_ip` дополняет ввод
+  текущим портом.
+
+**Репозиторий:** добавлен `_adb_target.bat` (был на GitHub, но
+отсутствовал в клоне — install.bat без него несамодостаточен).
+
 ## Changelog v2.1 (по обсуждению автодетекта шлюза и зависания USB)
 
 **network_watchdog.sh**
