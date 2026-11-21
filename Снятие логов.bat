@@ -4,6 +4,26 @@ title Signage Logs Tool (merged)
 REM v2: логи всегда рядом со скриптом, а не в текущем каталоге cmd (см. Инструкция 6.6)
 cd /d "%~dp0"
 REM ================= БАЗОВЫЕ ПЕРЕМЕННЫЕ =================
+REM v2.3: автопоиск adb.exe — как в _adb_target.bat (рядом -> родительский
+REM каталог -> PATH). Без этого на ноутбуке без adb в PATH скрипт падал
+REM на первой же команде. Каталог adb добавляется в начало PATH процесса,
+REM поэтому все вызовы остаются "adb" (и for /f работает без кавычек — v2.2).
+set "ADB=adb"
+set "ADB_EXE="
+if exist "%~dp0adb.exe" set "ADB_EXE=%~dp0adb.exe"
+if not defined ADB_EXE if exist "%~dp0..\adb.exe" set "ADB_EXE=%~dp0..\adb.exe"
+if not defined ADB_EXE (
+    adb version >nul 2>nul
+    if not errorlevel 1 set "ADB_EXE=adb"
+)
+if not defined ADB_EXE (
+    echo ОШИБКА: adb.exe не найден ни рядом со скриптом, ни в PATH.
+    pause
+    exit /b 1
+)
+set "ADB_EXE_DIR="
+if not "%ADB_EXE%"=="adb" for %%i in ("%ADB_EXE%") do set "ADB_EXE_DIR=%%~dpi"
+if defined ADB_EXE_DIR set "PATH=%ADB_EXE_DIR%;%PATH%"
 set "ADB=adb"
 set "OUT="
 set /p "OUT=Enter log folder name: "
@@ -54,7 +74,7 @@ set "IP="
 set /p "IP=Enter device IP (or IP:port): "
 echo %IP%| findstr /C:":" >nul
 if not errorlevel 1 for /f "tokens=1,2 delims=:" %%A in ("%IP%") do set "IP=%%A"& set "PORT=%%B"
-if not defined PORT set "PORT=5555"
+REM v2.3: удалён мёртвый код "if not defined PORT ..." — PORT всегда задан в шапке
 :connect_try
 set "SERIAL=%IP%:%PORT%"
 echo.
@@ -101,7 +121,8 @@ echo [ERROR] No response after adb root.
 pause
 exit /b 1
 )
-timeout /t 1 /nobreak >nul
+REM v2.3: пауза 2 с вместо 1 с — adbd после adb root на Wi-Fi поднимается дольше
+timeout /t 2 /nobreak >nul
 goto :wait_loop
 :root_stage
 echo.
@@ -151,7 +172,8 @@ echo 4. Dump logcat (logcat -d ^> log.txt)
 echo 5. Thermal snapshot (thermal_snapshot_fixed.txt)
 echo 6. FULL SNAPSHOT (wifi deep + reboots/crashes + storage + system/thermal/power)
 echo 7. Disconnect and exit
-echo 8. SEQUENCE 1+4+5+6 (dmesg, logcat dump, thermal, FULL SNAPSHOT)
+echo 8. SEQUENCE 1+4+5+6 (dmesg, logcat dump, thermal, FULL SNAPSHOT + scripts logs)
+echo 9. SCRIPTS LOGS: watchdog/cleaner (watchdog_log, cache_cleaner_log, scripts_state)
 echo =====================================================
 set "CHOICE="
 set /p "CHOICE=Select: "
@@ -163,6 +185,7 @@ if "%CHOICE%"=="5" goto :opt5
 if "%CHOICE%"=="6" goto :opt6
 if "%CHOICE%"=="7" goto :quit
 if "%CHOICE%"=="8" goto :opt8
+if "%CHOICE%"=="9" goto :opt9
 echo Wrong choice.
 goto :menu
 :opt1
@@ -265,7 +288,43 @@ REM --- Блок: система / тепло / питание (батареи �
 "%ADB%" -s "%SERIAL%" shell "ps -A -T -o PID,TID,STAT,PCPU,PMEM,NAME" > "%OUT%\threads.txt" 2>&1
 "%ADB%" -s "%SERIAL%" shell "%SHPREFIX% sh -c 'cat /sys/kernel/debug/usb/devices 2>/dev/null'" > "%OUT%\usb_devices.txt" 2>&1
 "%ADB%" -s "%SERIAL%" shell "dumpsys battery" > "%OUT%\power_ac.txt" 2>&1
+REM --- Блок: логи и состояние скриптов watchdog/cleaner (v2.3) ---
+call :scripts_logs
 exit /b 0
+REM ---- 9. Логи и состояние скриптов watchdog/cache_cleaner (v2.3) ----
+:opt9
+echo.
+echo Collecting watchdog/cleaner logs and state...
+call :scripts_logs
+echo [OK] watchdog_log.txt, cache_cleaner_log.txt, scripts_state.txt in %OUT%
+goto :menu
+
+REM ---- v2.3: сбор логов/состояния своих скриптов; используется п.9 и :snapshot_block ----
+REM Живость проверяется как в install.bat/harden.bat: PID-файл + /proc/$pid/cmdline
+REM (без pgrep -f, который совпадает с собственной командной строкой).
+:scripts_logs
+> "%OUT%\watchdog_log.txt" echo === /data/local/tmp/scripts/watchdog.log ===
+"%ADB%" -s "%SERIAL%" shell "%SHPREFIX% sh -c 'cat /data/local/tmp/scripts/watchdog.log 2>/dev/null'" >> "%OUT%\watchdog_log.txt" 2>&1
+> "%OUT%\cache_cleaner_log.txt" echo === /data/local/tmp/scripts/cache_cleaner.log ===
+"%ADB%" -s "%SERIAL%" shell "%SHPREFIX% sh -c 'cat /data/local/tmp/scripts/cache_cleaner.log 2>/dev/null'" >> "%OUT%\cache_cleaner_log.txt" 2>&1
+> "%OUT%\scripts_state.txt" echo === scripts state, device %SERIAL%, %DATE% %TIME% ===
+>> "%OUT%\scripts_state.txt" echo --- uptime ---
+"%ADB%" -s "%SERIAL%" shell cat /proc/uptime >> "%OUT%\scripts_state.txt" 2>&1
+>> "%OUT%\scripts_state.txt" echo --- init service ---
+"%ADB%" -s "%SERIAL%" shell getprop init.svc.led_monitor >> "%OUT%\scripts_state.txt" 2>&1
+>> "%OUT%\scripts_state.txt" echo --- pid files ---
+"%ADB%" -s "%SERIAL%" shell "%SHPREFIX% sh -c 'for f in watchdog.pid cache_cleaner.pid; do p=/data/local/tmp/scripts/$f; [ -f $p ] && echo $f=$(cat $p) || echo $f=missing; done'" >> "%OUT%\scripts_state.txt" 2>&1
+>> "%OUT%\scripts_state.txt" echo --- alive check (pidfile + cmdline) ---
+"%ADB%" -s "%SERIAL%" shell "%SHPREFIX% sh -c 'pid=$(cat /data/local/tmp/scripts/watchdog.pid 2>/dev/null); if grep -q network_watchdog /proc/$pid/cmdline 2>/dev/null; then echo watchdog=ALIVE:$pid; else echo watchdog=DEAD-or-missing; fi; pid=$(cat /data/local/tmp/scripts/cache_cleaner.pid 2>/dev/null); if grep -q cache_cleaner /proc/$pid/cmdline 2>/dev/null; then echo cache_cleaner=ALIVE:$pid; else echo cache_cleaner=DEAD-or-missing; fi'" >> "%OUT%\scripts_state.txt" 2>&1
+>> "%OUT%\scripts_state.txt" echo --- counters ---
+"%ADB%" -s "%SERIAL%" shell "%SHPREFIX% sh -c 'for f in reboot_counter.txt gateway.txt last_clean_day.txt; do p=/data/local/tmp/scripts/$f; [ -f $p ] && echo $f=$(cat $p) || echo $f=missing; done'" >> "%OUT%\scripts_state.txt" 2>&1
+>> "%OUT%\scripts_state.txt" echo --- scripts dir ---
+"%ADB%" -s "%SERIAL%" shell "%SHPREFIX% ls -la /data/local/tmp/scripts/" >> "%OUT%\scripts_state.txt" 2>&1
+>> "%OUT%\scripts_state.txt" echo --- network adb props ---
+"%ADB%" -s "%SERIAL%" shell getprop persist.adb.tcp.port >> "%OUT%\scripts_state.txt" 2>&1
+"%ADB%" -s "%SERIAL%" shell getprop service.adb.tcp.port >> "%OUT%\scripts_state.txt" 2>&1
+exit /b 0
+
 :quit
 echo.
 if /I "%CONNTYPE%"=="net" "%ADB%" disconnect %SERIAL% >nul 2>&1

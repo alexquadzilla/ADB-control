@@ -80,6 +80,26 @@ deploy.bat usb                     :: первое USB-устройство
 `gateway.txt`; cleaner: `cache_cleaner.log`, `cache_cleaner.pid`,
 `last_clean_day.txt`.
 
+## Changelog v2.3 (логи watchdog/cleaner в «Снятие логов.bat»)
+
+- **Новый пункт меню 9 «SCRIPTS LOGS»**: снимает с устройства
+  `watchdog.log` и `cache_cleaner.log` целиком (ротация 250 КБ — полный
+  `cat`) + `scripts_state.txt`: uptime, `init.svc.led_monitor`, PID-файлы,
+  живость скриптов (PID-файл + `/proc/$pid/cmdline`, как в install.bat —
+  без `pgrep -f`, совпадающего с собственной командной строкой),
+  счётчики `reboot_counter.txt` / `gateway.txt` / `last_clean_day.txt`,
+  содержимое `/data/local/tmp/scripts/`, свойства сетевого ADB.
+- **Тот же сбор включён в FULL SNAPSHOT** (пункты 6 и 8): при выезде
+  «снял снимок и уехал» логи скриптов больше не остаются только на
+  устройстве.
+- **Автопоиск adb.exe** (рядом со скриптом → родительский каталог →
+  PATH) — как в `_adb_target.bat`; скрипт больше не падает на ноутбуке
+  без adb в PATH.
+- После `adb root` retry-цикл ждёт 10 × 2 с вместо 10 × 1 с.
+- Удалён мёртвый код `if not defined PORT set "PORT=5555"` (PORT всегда
+  задан в шапке). Парсинг `IP:порт` в приглашении — проверен тестом,
+  корректен.
+
 ## Changelog v2.2 (фикс «The filename … is incorrect» и ввод порта)
 
 **Причина ошибки на Windows 11:** внутри `for /f` команда исполняется
