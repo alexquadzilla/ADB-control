@@ -10,7 +10,7 @@ if errorlevel 1 (
 
 echo.
 echo ========================================
-echo  Защита устройства LED-экрана (v2)
+echo  Защита устройства LED-экрана (v2.4)
 echo ========================================
 echo  Устройство: %DEV%
 echo  Режим: %MODE%
@@ -41,8 +41,8 @@ set /p WD_STATUS=<"%TEMP%\led_wd_check.txt"
 del "%TEMP%\led_wd_check.txt" >nul 2>&1
 
 if "!WD_STATUS!"=="MISSING" (
-    echo   ВНИМАНИЕ: watchdog не запущен (PID-файл отсутствует)
-    echo   Перед отключением ADB он будет перезапущен (шаг 6).
+    echo   ВНИМАНИЕ: watchdog не запущен - PID-файл отсутствует
+    echo   Перед отключением ADB он будет перезапущен на шаге 6.
     set "WD_OK=0"
 ) else (
     for /f "tokens=1,2 delims=:" %%a in ("!WD_STATUS!") do (
@@ -50,11 +50,11 @@ if "!WD_STATUS!"=="MISSING" (
         set "WD_PID=%%b"
     )
     if "!WD_STATE!"=="ALIVE" (
-        echo   OK: watchdog жив (PID !WD_PID^)
+        echo   OK: watchdog жив, PID !WD_PID!
         set "WD_OK=1"
     ) else (
-        echo   ВНИМАНИЕ: watchdog мёртв (PID !WD_PID^)
-        echo   Перед отключением ADB он будет перезапущен (шаг 6).
+        echo   ВНИМАНИЕ: watchdog мёртв, PID !WD_PID!
+        echo   Перед отключением ADB он будет перезапущен на шаге 6.
         set "WD_OK=0"
     )
 )
@@ -67,7 +67,7 @@ set /p CL_STATUS=<"%TEMP%\led_cl_check.txt"
 del "%TEMP%\led_cl_check.txt" >nul 2>&1
 
 if "!CL_STATUS!"=="MISSING" (
-    echo   ВНИМАНИЕ: cleaner не запущен (PID-файл отсутствует)
+    echo   ВНИМАНИЕ: cleaner не запущен - PID-файл отсутствует
     set "CL_OK=0"
 ) else (
     for /f "tokens=1,2 delims=:" %%a in ("!CL_STATUS!") do (
@@ -75,10 +75,10 @@ if "!CL_STATUS!"=="MISSING" (
         set "CL_PID=%%b"
     )
     if "!CL_STATE!"=="ALIVE" (
-        echo   OK: cleaner жив (PID !CL_PID^)
+        echo   OK: cleaner жив, PID !CL_PID!
         set "CL_OK=1"
     ) else (
-        echo   ВНИМАНИЕ: cleaner мёртв (PID !CL_PID^)
+        echo   ВНИМАНИЕ: cleaner мёртв, PID !CL_PID!
         set "CL_OK=0"
     )
 )
